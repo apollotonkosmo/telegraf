@@ -3,43 +3,38 @@ package procstat
 import (
 	"time"
 
-	"github.com/shirou/gopsutil/process"
-
 	"github.com/influxdata/telegraf"
 )
 
 type SpecProcessor struct {
 	Prefix string
-	pid    int32
-	tags   map[string]string
+	pid    PID
 	fields map[string]interface{}
 	acc    telegraf.Accumulator
-	proc   *process.Process
+	proc   *Proc
 }
 
 func NewSpecProcessor(
 	processName string,
 	prefix string,
-	pid int32,
+	pid PID,
 	acc telegraf.Accumulator,
-	p *process.Process,
-	tags map[string]string,
+	proc *Proc,
 ) *SpecProcessor {
 	if processName != "" {
-		tags["process_name"] = processName
+		proc.Tags()["process_name"] = processName
 	} else {
-		name, err := p.Name()
+		name, err := proc.Process.Name()
 		if err == nil {
-			tags["process_name"] = name
+			proc.Tags()["process_name"] = name
 		}
 	}
 	return &SpecProcessor{
 		Prefix: prefix,
 		pid:    pid,
-		tags:   tags,
 		fields: make(map[string]interface{}),
 		acc:    acc,
-		proc:   p,
+		proc:   proc,
 	}
 }
 
@@ -51,8 +46,8 @@ func (p *SpecProcessor) pushMetrics() {
 	fields := map[string]interface{}{}
 
 	//If pid is not present as a tag, include it as a field.
-	if _, pidInTags := p.tags["pid"]; !pidInTags {
-		fields["pid"] = p.pid
+	if _, pidInTags := p.proc.Tags()["pid"]; !pidInTags {
+		fields["pid"] = int32(p.pid)
 	}
 
 	numThreads, err := p.proc.NumThreads()
@@ -95,9 +90,10 @@ func (p *SpecProcessor) pushMetrics() {
 	}
 
 	cpu_perc, err := p.proc.Percent(time.Duration(0))
-	if err == nil && cpu_perc != 0 {
+	if err == nil && p.proc.HasCPUTimes {
 		fields[prefix+"cpu_usage"] = cpu_perc
 	}
+	p.proc.HasCPUTimes = true
 
 	mem, err := p.proc.MemoryInfo()
 	if err == nil {
@@ -106,5 +102,5 @@ func (p *SpecProcessor) pushMetrics() {
 		fields[prefix+"memory_swap"] = mem.Swap
 	}
 
-	p.acc.AddFields("procstat", fields, p.tags)
+	p.acc.AddFields("procstat", fields, p.proc.Tags())
 }
