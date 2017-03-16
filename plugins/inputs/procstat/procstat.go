@@ -2,45 +2,12 @@ package procstat
 
 import (
 	"fmt"
-	"time"
-
-	"github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/process"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
 )
 
 type PID int32
-
-type PIDGatherer interface {
-	PidFile(path string) ([]PID, error)
-	Pattern(pattern string) ([]PID, error)
-	Uid(user string) ([]PID, error)
-	FullPattern(path string) ([]PID, error)
-}
-
-type Process interface {
-	IOCounters() (*process.IOCountersStat, error)
-	MemoryInfo() (*process.MemoryInfoStat, error)
-	NumCtxSwitches() (*process.NumCtxSwitchesStat, error)
-	NumFDs() (int32, error)
-	NumThreads() (int32, error)
-	Percent(interval time.Duration) (float64, error)
-	Times() (*cpu.TimesStat, error)
-	Tags() map[string]string
-}
-
-type Proc struct {
-	HasCPUTimes bool
-
-	tags map[string]string
-	*process.Process
-}
-
-func (p *Proc) Tags() map[string]string {
-	return p.tags
-}
 
 type Procstat struct {
 	PidFile     string `toml:"pid_file"`
@@ -51,8 +18,10 @@ type Procstat struct {
 	User        string
 	PidTag      bool
 
-	pidGatherer PIDGatherer
-	pInfo       map[PID]*Proc
+	pidFinder       PIDFinder
+	createPIDFinder func() (PIDFinder, error)
+	procs           map[PID]Process
+	createProcess   func(PID) (Process, error)
 }
 
 var sampleConfig = `
@@ -86,83 +55,94 @@ func (_ *Procstat) Description() string {
 }
 
 func (p *Procstat) Gather(acc telegraf.Accumulator) error {
-	if p.pidGatherer == nil {
-		pgrep, err := NewPgrep()
-		if err != nil {
-			return err
-		}
-		p.pidGatherer = pgrep
-	}
-
-	procs, err := p.createProcesses(p.pInfo)
+	procs, err := p.updateProcesses(p.procs)
 	if err != nil {
 		return fmt.Errorf(
 			"E! Error: procstat getting process, exe: [%s] pidfile: [%s] pattern: [%s] user: [%s] %s",
 			p.Exe, p.PidFile, p.Pattern, p.User, err.Error())
 	}
-	p.pInfo = procs
+	p.procs = procs
 
-	for pid, proc := range p.pInfo {
-		if p.PidTag {
-			proc.Tags()["pid"] = fmt.Sprint(pid)
-		}
-		p := NewSpecProcessor(p.ProcessName, p.Prefix, pid, acc, proc)
+	for _, proc := range p.procs {
+		p := NewSpecProcessor(p.Prefix, acc, proc)
 		p.pushMetrics()
 	}
 
 	return nil
 }
 
-func (p *Procstat) createProcesses(prevInfo map[PID]*Proc) (map[PID]*Proc, error) {
-	pids, tags, err := p.gatherPids()
+// Update monitored Processes
+func (p *Procstat) updateProcesses(prevInfo map[PID]Process) (map[PID]Process, error) {
+	pids, tags, err := p.findPids()
 	if err != nil {
 		return nil, err
 	}
 
-	procs := make(map[PID]*Proc)
+	procs := make(map[PID]Process)
 
 	for _, pid := range pids {
 		info, ok := prevInfo[pid]
 		if ok {
 			procs[pid] = info
 		} else {
-			proc, err := process.NewProcess(int32(pid))
+			proc, err := p.createProcess(pid)
 			if err != nil {
+				// No problem; process may have ended after we found it
 				continue
 			}
+			procs[pid] = proc
 
-			procTags := make(map[string]string)
+			// Add initial tags
 			for k, v := range tags {
-				procTags[k] = v
+				proc.Tags()[k] = v
 			}
 
-			pinfo := Proc{
-				Process:     proc,
-				HasCPUTimes: false,
-				tags:        procTags,
+			// Add pid tag if needed
+			if p.PidTag {
+				proc.Tags()["pid"] = fmt.Sprint(pid)
 			}
-			procs[pid] = &pinfo
+			if p.ProcessName != "" {
+				proc.Tags()["process_name"] = p.ProcessName
+			}
 		}
 	}
 	return procs, nil
 }
 
-func (p *Procstat) gatherPids() ([]PID, map[string]string, error) {
+// Create and return PIDGatherer lazily
+func (p *Procstat) getPIDFinder() (PIDFinder, error) {
+	if p.pidFinder == nil {
+		f, err := p.createPIDFinder()
+		if err != nil {
+			return nil, err
+		}
+		p.pidFinder = f
+	}
+	return p.pidFinder, nil
+}
+
+// Get matching PIDs and their initial tags
+func (p *Procstat) findPids() ([]PID, map[string]string, error) {
 	var pids []PID
 	var tags map[string]string
 	var err error
 
+	f, err := p.getPIDFinder()
+	if err != nil {
+		return nil, nil, err
+	}
+
 	if p.PidFile != "" {
-		pids, err = p.pidGatherer.PidFile(p.PidFile)
+		pids, err = f.PidFile(p.PidFile)
 		tags = map[string]string{"pidfile": p.PidFile}
 	} else if p.Exe != "" {
-		pids, err = p.pidGatherer.Pattern(p.Exe)
+		pids, err = f.Pattern(p.Exe)
 		tags = map[string]string{"exe": p.Exe}
 	} else if p.Pattern != "" {
-		pids, err = p.pidGatherer.FullPattern(p.Pattern)
+		pids, err = f.FullPattern(p.Pattern)
 		tags = map[string]string{"pattern": p.Pattern}
 	} else if p.User != "" {
-		pids, err = p.pidGatherer.Uid(p.User)
+		pids, err = f.Uid(p.User)
 		tags = map[string]string{"user": p.User}
 	} else {
 		err = fmt.Errorf("Either exe, pid_file, user, or pattern has to be specified")
@@ -173,6 +153,9 @@ func (p *Procstat) gatherPids() ([]PID, map[string]string, error) {
 
 func init() {
 	inputs.Add("procstat", func() telegraf.Input {
-		return &Procstat{}
+		return &Procstat{
+			createPIDFinder: NewPgrep,
+			createProcess:   NewProc,
+		}
 	})
 }

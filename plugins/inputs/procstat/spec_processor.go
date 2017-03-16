@@ -8,30 +8,18 @@ import (
 
 type SpecProcessor struct {
 	Prefix string
-	pid    PID
 	fields map[string]interface{}
 	acc    telegraf.Accumulator
-	proc   *Proc
+	proc   Process
 }
 
 func NewSpecProcessor(
-	processName string,
 	prefix string,
-	pid PID,
 	acc telegraf.Accumulator,
-	proc *Proc,
+	proc Process,
 ) *SpecProcessor {
-	if processName != "" {
-		proc.Tags()["process_name"] = processName
-	} else {
-		name, err := proc.Process.Name()
-		if err == nil {
-			proc.Tags()["process_name"] = name
-		}
-	}
 	return &SpecProcessor{
 		Prefix: prefix,
-		pid:    pid,
 		fields: make(map[string]interface{}),
 		acc:    acc,
 		proc:   proc,
@@ -43,11 +31,20 @@ func (p *SpecProcessor) pushMetrics() {
 	if p.Prefix != "" {
 		prefix = p.Prefix + "_"
 	}
+
 	fields := map[string]interface{}{}
+
+	//If process_name tag is not already set, set to actual name
+	if _, nameInTags := p.proc.Tags()["process_name"]; !nameInTags {
+		name, err := p.proc.Name()
+		if err == nil {
+			p.proc.Tags()["process_name"] = name
+		}
+	}
 
 	//If pid is not present as a tag, include it as a field.
 	if _, pidInTags := p.proc.Tags()["pid"]; !pidInTags {
-		fields["pid"] = int32(p.pid)
+		fields["pid"] = int32(p.proc.PID())
 	}
 
 	numThreads, err := p.proc.NumThreads()
@@ -90,10 +87,9 @@ func (p *SpecProcessor) pushMetrics() {
 	}
 
 	cpu_perc, err := p.proc.Percent(time.Duration(0))
-	if err == nil && p.proc.HasCPUTimes {
+	if err == nil {
 		fields[prefix+"cpu_usage"] = cpu_perc
 	}
-	p.proc.HasCPUTimes = true
 
 	mem, err := p.proc.MemoryInfo()
 	if err == nil {

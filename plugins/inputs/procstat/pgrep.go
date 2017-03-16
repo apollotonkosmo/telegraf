@@ -7,11 +7,20 @@ import (
 	"strings"
 )
 
+// A PIDFinder
+type PIDFinder interface {
+	PidFile(path string) ([]PID, error)
+	Pattern(pattern string) ([]PID, error)
+	Uid(user string) ([]PID, error)
+	FullPattern(path string) ([]PID, error)
+}
+
+// Implemention of PIDGatherer that execs pgrep to find processes
 type Pgrep struct {
 	path string
 }
 
-func NewPgrep() (*Pgrep, error) {
+func NewPgrep() (PIDFinder, error) {
 	path, err := exec.LookPath("pgrep")
 	if err != nil {
 		return nil, fmt.Errorf("Could not find pgrep binary: %s", err)
@@ -21,25 +30,25 @@ func NewPgrep() (*Pgrep, error) {
 
 func (pg *Pgrep) PidFile(path string) ([]PID, error) {
 	args := []string{"-F", path}
-	return gather(pg.path, args)
+	return find(pg.path, args)
 }
 
 func (pg *Pgrep) Pattern(pattern string) ([]PID, error) {
 	args := []string{pattern}
-	return gather(pg.path, args)
+	return find(pg.path, args)
 }
 
 func (pg *Pgrep) Uid(user string) ([]PID, error) {
 	args := []string{"-u", user}
-	return gather(pg.path, args)
+	return find(pg.path, args)
 }
 
 func (pg *Pgrep) FullPattern(pattern string) ([]PID, error) {
 	args := []string{"-f", pattern}
-	return gather(pg.path, args)
+	return find(pg.path, args)
 }
 
-func gather(path string, args []string) ([]PID, error) {
+func find(path string, args []string) ([]PID, error) {
 	out, err := run(path, args)
 	if err != nil {
 		return nil, err
