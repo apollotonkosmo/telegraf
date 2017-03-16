@@ -2,6 +2,7 @@ package procstat
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/plugins/inputs"
@@ -64,11 +65,86 @@ func (p *Procstat) Gather(acc telegraf.Accumulator) error {
 	p.procs = procs
 
 	for _, proc := range p.procs {
-		p := NewSpecProcessor(p.Prefix, acc, proc)
-		p.pushMetrics()
+		p.addMetrics(proc, acc)
 	}
 
 	return nil
+}
+
+// Add metrics a single Process
+func (p *Procstat) addMetrics(proc Process, acc telegraf.Accumulator) {
+	var prefix string
+	if p.Prefix != "" {
+		prefix = p.Prefix + "_"
+	}
+
+	fields := map[string]interface{}{}
+
+	//If process_name tag is not already set, set to actual name
+	if _, nameInTags := proc.Tags()["process_name"]; !nameInTags {
+		name, err := proc.Name()
+		if err == nil {
+			proc.Tags()["process_name"] = name
+		}
+	}
+
+	//If pid is not present as a tag, include it as a field.
+	if _, pidInTags := proc.Tags()["pid"]; !pidInTags {
+		fields["pid"] = int32(proc.PID())
+	}
+
+	numThreads, err := proc.NumThreads()
+	if err == nil {
+		fields[prefix+"num_threads"] = numThreads
+	}
+
+	fds, err := proc.NumFDs()
+	if err == nil {
+		fields[prefix+"num_fds"] = fds
+	}
+
+	ctx, err := proc.NumCtxSwitches()
+	if err == nil {
+		fields[prefix+"voluntary_context_switches"] = ctx.Voluntary
+		fields[prefix+"involuntary_context_switches"] = ctx.Involuntary
+	}
+
+	io, err := proc.IOCounters()
+	if err == nil {
+		fields[prefix+"read_count"] = io.ReadCount
+		fields[prefix+"write_count"] = io.WriteCount
+		fields[prefix+"read_bytes"] = io.ReadBytes
+		fields[prefix+"write_bytes"] = io.WriteBytes
+	}
+
+	cpu_time, err := proc.Times()
+	if err == nil {
+		fields[prefix+"cpu_time_user"] = cpu_time.User
+		fields[prefix+"cpu_time_system"] = cpu_time.System
+		fields[prefix+"cpu_time_idle"] = cpu_time.Idle
+		fields[prefix+"cpu_time_nice"] = cpu_time.Nice
+		fields[prefix+"cpu_time_iowait"] = cpu_time.Iowait
+		fields[prefix+"cpu_time_irq"] = cpu_time.Irq
+		fields[prefix+"cpu_time_soft_irq"] = cpu_time.Softirq
+		fields[prefix+"cpu_time_steal"] = cpu_time.Steal
+		fields[prefix+"cpu_time_stolen"] = cpu_time.Stolen
+		fields[prefix+"cpu_time_guest"] = cpu_time.Guest
+		fields[prefix+"cpu_time_guest_nice"] = cpu_time.GuestNice
+	}
+
+	cpu_perc, err := proc.Percent(time.Duration(0))
+	if err == nil {
+		fields[prefix+"cpu_usage"] = cpu_perc
+	}
+
+	mem, err := proc.MemoryInfo()
+	if err == nil {
+		fields[prefix+"memory_rss"] = mem.RSS
+		fields[prefix+"memory_vms"] = mem.VMS
+		fields[prefix+"memory_swap"] = mem.Swap
+	}
+
+	acc.AddFields("procstat", fields, proc.Tags())
 }
 
 // Update monitored Processes
